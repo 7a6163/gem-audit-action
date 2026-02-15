@@ -1,0 +1,153 @@
+name: 'gem-audit'
+description: 'Audit Gemfile.lock for vulnerable gem versions and insecure sources'
+author: '7a6163'
+
+branding:
+  icon: 'shield'
+  color: 'red'
+
+inputs:
+  version:
+    description: 'gem-audit version to use'
+    required: false
+    default: 'latest'
+  severity:
+    description: 'Minimum severity level to report (none, low, medium, high, critical)'
+    required: false
+  strict:
+    description: 'Treat parse/load warnings as errors (exit code 2)'
+    required: false
+    default: 'false'
+  max-db-age:
+    description: 'Maximum advisory database age in days before warning'
+    required: false
+  fail-on-stale:
+    description: 'Exit with code 3 if the advisory database is stale'
+    required: false
+    default: 'false'
+  gemfile-lock:
+    description: 'Path to the Gemfile.lock file'
+    required: false
+    default: 'Gemfile.lock'
+  ignore:
+    description: 'Space-separated advisory IDs to ignore'
+    required: false
+  format:
+    description: 'Output format: text or json'
+    required: false
+    default: 'text'
+  output:
+    description: 'Write output to a file instead of stdout'
+    required: false
+  working-directory:
+    description: 'Project directory to audit'
+    required: false
+    default: '.'
+  quiet:
+    description: 'Suppress output'
+    required: false
+    default: 'false'
+  verbose:
+    description: 'Show detailed advisory descriptions'
+    required: false
+    default: 'false'
+
+outputs:
+  exit-code:
+    description: 'Exit code from gem-audit (0=clean, 1=vulnerable, 2=error, 3=stale)'
+    value: ${{ steps.audit.outputs.exit-code }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Detect platform
+      id: platform
+      shell: bash
+      run: |
+        case "${{ runner.os }}-${{ runner.arch }}" in
+          Linux-X64)   target="x86_64-unknown-linux-gnu" ;;
+          Linux-ARM64) target="aarch64-unknown-linux-gnu" ;;
+          macOS-X64)   target="x86_64-apple-darwin" ;;
+          macOS-ARM64) target="aarch64-apple-darwin" ;;
+          Windows-X64) target="x86_64-pc-windows-msvc" ;;
+          *) echo "::error::Unsupported platform: ${{ runner.os }}-${{ runner.arch }}" && exit 1 ;;
+        esac
+        echo "target=$target" >> "$GITHUB_OUTPUT"
+
+    - name: Download gem-audit
+      id: download
+      shell: bash
+      run: |
+        version="${{ inputs.version }}"
+        target="${{ steps.platform.outputs.target }}"
+
+        if [ "$version" = "latest" ]; then
+          download_url=$(curl -sL \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/7a6163/gem-audit/releases/latest" \
+            | grep "browser_download_url.*${target}" \
+            | head -1 \
+            | cut -d '"' -f 4)
+        else
+          download_url="https://github.com/7a6163/gem-audit/releases/download/v${version}/gem-audit-${target}.tar.gz"
+        fi
+
+        if [ -z "$download_url" ]; then
+          echo "::error::Could not find gem-audit release for target ${target}"
+          exit 1
+        fi
+
+        echo "Downloading gem-audit from ${download_url}"
+        curl -sL "$download_url" -o gem-audit.tar.gz
+        tar -xzf gem-audit.tar.gz
+        chmod +x gem-audit
+        echo "bin=${{ github.workspace }}/gem-audit" >> "$GITHUB_OUTPUT"
+
+    - name: Run gem-audit
+      id: audit
+      shell: bash
+      run: |
+        args=("check")
+        args+=("${{ inputs.working-directory }}")
+        args+=("--gemfile-lock" "${{ inputs.gemfile-lock }}")
+        args+=("--format" "${{ inputs.format }}")
+
+        if [ "${{ inputs.quiet }}" = "true" ]; then
+          args+=("--quiet")
+        fi
+
+        if [ "${{ inputs.verbose }}" = "true" ]; then
+          args+=("--verbose")
+        fi
+
+        if [ -n "${{ inputs.severity }}" ]; then
+          args+=("--severity" "${{ inputs.severity }}")
+        fi
+
+        if [ "${{ inputs.strict }}" = "true" ]; then
+          args+=("--strict")
+        fi
+
+        if [ -n "${{ inputs.max-db-age }}" ]; then
+          args+=("--max-db-age" "${{ inputs.max-db-age }}")
+        fi
+
+        if [ "${{ inputs.fail-on-stale }}" = "true" ]; then
+          args+=("--fail-on-stale")
+        fi
+
+        if [ -n "${{ inputs.ignore }}" ]; then
+          args+=("--ignore" ${{ inputs.ignore }})
+        fi
+
+        if [ -n "${{ inputs.output }}" ]; then
+          args+=("--output" "${{ inputs.output }}")
+        fi
+
+        set +e
+        ${{ steps.download.outputs.bin }} "${args[@]}"
+        code=$?
+        set -e
+
+        echo "exit-code=$code" >> "$GITHUB_OUTPUT"
+        exit $code
